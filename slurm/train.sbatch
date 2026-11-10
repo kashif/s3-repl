@@ -15,8 +15,7 @@ ROOT=/fsx/kashif/s3-repl
 MODEL=${MODEL:-Qwen/Qwen3-0.6B}
 PORT=${PORT:-$((20000 + SLURM_JOB_ID % 20000))}
 export HF_HOME=${HF_HOME:-/fsx/kashif/.cache/huggingface}
-export PYTHONPATH=/fsx/kashif/trl${PYTHONPATH:+:$PYTHONPATH}  # swarmlab: editable install in the base env
-export S3_TMP=/tmp/s3-$SLURM_JOB_ID PYTHONUNBUFFERED=1
+export PYTHONPATH=/fsx/kashif/trl${PYTHONPATH:+:$PYTHONPATH} PYTHONUNBUFFERED=1
 cd "$ROOT"
 echo "node=$(hostname) model=$MODEL port=$PORT args=$*"
 CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 VLLM_SERVER_DEV_MODE=1 /fsx/kashif/miniconda3/bin/vllm serve "$MODEL" \
@@ -25,13 +24,11 @@ CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 VLLM_SERVER_DEV_MODE=1 /fsx/kashif/minic
   --logprobs-mode processed_logprobs --weight-transfer-config '{"backend":"nccl"}' \
   > "logs/vllm-$SLURM_JOB_ID.log" 2>&1 &
 VLLM_PID=$!
-trap 'kill $VLLM_PID 2>/dev/null || true; rm -rf "$S3_TMP"' EXIT
+trap 'kill $VLLM_PID 2>/dev/null || true' EXIT
 for i in $(seq 1 180); do
   kill -0 $VLLM_PID 2>/dev/null || { echo "vllm died"; tail -40 "logs/vllm-$SLURM_JOB_ID.log"; exit 1; }
   curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && { echo "vllm ready after $((i * 10)) s"; break; }
   sleep 10
 done
-SPEC="logs/spec-$SLURM_JOB_ID-train.yaml"
-sed "s#http://127.0.0.1:8000#http://127.0.0.1:$PORT#" specs/train.yaml > "$SPEC"
 CUDA_VISIBLE_DEVICES=1 /fsx/kashif/miniconda3/bin/accelerate launch --num_processes 1 --mixed_precision bf16 \
-  train_s3.py --spec "$SPEC" --vllm-url "http://127.0.0.1:$PORT" --output-dir "checkpoints/s3-$SLURM_JOB_ID" "$@"
+  train_s3.py --vllm-url "http://127.0.0.1:$PORT" --output-dir "checkpoints/s3-$SLURM_JOB_ID" "$@"

@@ -1,39 +1,23 @@
-"""Per-episode summary of s3 runs: success, per-agent tokens, messages, reads, answers, and the
-paper's Table 11 failure causes (first matching).
+"""Per-episode summary of `eval.py` output: success, per-agent tokens, messages, reads, answers, and the paper's
+Table 11 failure causes (first matching).
 
-    uv run --project /fsx/kashif/swarmlab python analysis/episodes.py runs/ [--experiment s3-eval_base] [--show RUN]
+    python analysis/episodes.py runs/base.jsonl [--show PROBLEM] [--quiet]
 """
 from __future__ import annotations
 
 import argparse
 import json
-import pickle
 import re
+import sys
 from pathlib import Path
 
-from swarmlab.world.aggregation import number_words
-
-LAMBDA, WORK, FINAL = 0.25, 8192, 1024
-
-
-def blob(run: Path, h: str) -> bytes:
-    return (run / "blobs" / h[:2] / h).read_bytes()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from s3.task import number_words  # noqa: E402
 
 
-def load(run: Path) -> tuple[dict, dict]:
-    meta = json.loads((run / "run.json").read_text())
-    snaps = sorted((run / "snapshots").glob("*.json"))
-    snap = json.loads(snaps[-1].read_text())
-    agents = {}
-    for k, h in snap["plugins"].items():
-        if k.startswith("participant:"):
-            agents[k.split(":", 1)[1]] = pickle.loads(blob(run, h))
-    return meta, agents
-
-
-def own_number_sent(st: dict, number: int) -> bool:
-    words, digits = number_words(number), str(number)
-    for e in st.get("events", []):
+def sent_own(agent: dict) -> bool:
+    words, digits = number_words(agent["number"]), str(agent["number"])
+    for e in agent["events"]:
         if e["kind"] == "message" and e.get("ok"):
             t = e["text"].lower()
             if words in t or re.search(rf"(?<!\d){digits}(?!\d)", t):
@@ -41,71 +25,50 @@ def own_number_sent(st: dict, number: int) -> bool:
     return False
 
 
-def summarize(run: Path) -> dict | None:
-    meta, agents = load(run)
-    score = meta.get("score") or {}
-    if not agents or "numbers" not in score:
+def cause(ep: dict) -> str | None:
+    if ep["success"]:
         return None
-    numbers, target = score["numbers"], sorted(score["numbers"].values())
-    per = {}
-    for a, st in sorted(agents.items()):
-        ev = st.get("events", [])
-        msgs = [e for e in ev if e["kind"] == "message"]
-        per[a] = {"work": st.get("work_generated", 0), "final": st.get("final_generated", 0),
-                  "messages": len(msgs), "broadcasts": sum(e["to"].lower() == "all" for e in msgs),
-                  "reads": sum(e["kind"] == "read" for e in ev),
-                  "sent_own": own_number_sent(st, numbers[a]), "answer": st.get("answer"),
-                  "work_end": next((e["reason"] for e in ev if e["kind"] == "work_end"), None),
-                  "read_before_send": next((e["kind"] == "read" for e in ev if e["kind"] in ("read", "message")),
-                                           False)}
-    success = bool(score.get("success"))
-    tokens = sum(p["work"] + p["final"] for p in per.values())
-    n = len(per)
-    reward = (1 - LAMBDA * min(1.0, tokens / (n * (WORK + FINAL)))) if success else 0.0
-    cause = None
-    if not success:
-        if any(p["messages"] == 0 for p in per.values()):
-            cause = "a number withheld: an agent never messaged"
-        elif not all(p["sent_own"] for p in per.values()):
-            cause = "a number withheld: asked only, or misstated"
-        elif not any(p["reads"] for p in per.values()):
-            cause = "sent but never read"
-        else:
-            cause = "had or could have had all numbers, answer wrong"
-    return {"run": meta.get("run") or run.name, "success": success, "reward": round(reward, 3),
-            "tokens": tokens, "n": n, "target": target, "cause": cause, "agents": per}
+    ags = ep["agents"]
+    if any(not any(e["kind"] == "message" and e.get("ok") for e in a["events"]) for a in ags):
+        return "a number withheld: an agent never messaged"
+    if not all(sent_own(a) for a in ags):
+        return "a number withheld: asked only, or misstated"
+    if not any(e["kind"] == "read" for a in ags for e in a["events"]):
+        return "sent but never read"
+    return "had or could have had all numbers, answer wrong"
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("runs", type=Path)
-    ap.add_argument("--experiment")
-    ap.add_argument("--show")
+    ap.add_argument("jsonl", type=Path, nargs="+")
+    ap.add_argument("--show", type=int, help="print the agents of this problem id")
+    ap.add_argument("--quiet", action="store_true", help="totals only")
     a = ap.parse_args()
-    rows = []
-    for rj in sorted(a.runs.glob("*/run.json")):
-        if a.experiment and not rj.parent.name.startswith(a.experiment + "__"):
-            continue
-        s = summarize(rj.parent)
-        if s:
-            rows.append(s)
-    for s in rows:
-        if a.show and a.show not in s["run"]:
-            continue
-        print(f"{s['run']}: success={s['success']} reward={s['reward']} tokens={s['tokens']} "
-              f"target={s['target']} cause={s['cause']}")
-        for ag, p in s["agents"].items():
-            print(f"   {ag}: work={p['work']} final={p['final']} msgs={p['messages']} (all={p['broadcasts']}) "
-                  f"reads={p['reads']} sent_own={p['sent_own']} read_first={p['read_before_send']} "
-                  f"end={p['work_end']} answer={p['answer']}")
-    if rows:
+    for path in a.jsonl:
+        rows = [json.loads(line) for line in path.open()]
+        for ep in rows:
+            if a.quiet or (a.show is not None and ep["problem"] != a.show):
+                continue
+            print(f"problem {ep['problem']}: success={ep['success']} reward={ep['reward']:.3f} tokens={ep['tokens']} "
+                  f"target={ep['target']} cause={cause(ep)}")
+            for ag in ep["agents"]:
+                ev = ag["events"]
+                msgs = [e for e in ev if e["kind"] == "message"]
+                end = next((e["reason"] for e in ev if e["kind"] == "work_end"), None)
+                print(f"   {ag['name']} ({ag['number']}): work={ag['work']} final={ag['final']} msgs={len(msgs)} "
+                      f"(all={sum(e['to'].lower() == 'all' for e in msgs)}) reads={sum(e['kind'] == 'read' for e in ev)} "
+                      f"sent_own={sent_own(ag)} end={end} answer={ag['answer']}")
         k = len(rows)
-        print(f"\n{k} episodes: success {sum(r['success'] for r in rows) / k:.1%}, "
-              f"mean tokens {sum(r['tokens'] for r in rows) / k:.0f}")
+        if not k:
+            continue
+        msgs = sum(e["kind"] == "message" for r in rows for ag in r["agents"] for e in ag["events"])
+        print(f"\n{path}: {k} episodes, success {sum(r['success'] for r in rows) / k:.1%}, "
+              f"mean tokens/team {sum(r['tokens'] for r in rows) / k:.0f}, messages/team {msgs / k:.2f}")
         causes: dict[str, int] = {}
         for r in rows:
-            if r["cause"]:
-                causes[r["cause"]] = causes.get(r["cause"], 0) + 1
+            c = cause(r)
+            if c:
+                causes[c] = causes.get(c, 0) + 1
         fails = sum(causes.values())
         for c, v in sorted(causes.items(), key=lambda x: -x[1]):
             print(f"  {c}: {v / fails:.0%} of failures")
