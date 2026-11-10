@@ -221,7 +221,7 @@ def main() -> None:
         max_concurrent_rollouts=a.concurrent_teams,
         vllm_server_base_url=a.vllm_url,
         bf16=True, gradient_checkpointing=True,
-        logging_steps=1, save_strategy="steps", save_steps=10, report_to="none",
+        logging_steps=1, save_strategy="steps", save_steps=10, save_total_limit=1, report_to="none",
         log_completions=True, num_completions_to_print=1,
         rollout_worker_timeout=1800.0,
     )
