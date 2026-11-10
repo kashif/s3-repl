@@ -1,0 +1,37 @@
+name: s3-smoke
+seeds:
+- 1
+- 2
+budget:
+  soft_usd: 0
+  hard_usd: 0
+options:
+  commit: async
+  rounds_per_agent: 1
+  max_calls_per_turn: 100000
+  concurrency: 1024
+roles:
+  s3:
+    tools:
+    - post
+    - read_board
+    - submit
+    - wait
+arms:
+  agg_n4:
+    world:
+      type: aggregation
+    medium:
+      topology:
+        type: direct
+        params:
+          allow_all: true
+      delivery: pull
+    participants:
+    - type: s3_agent
+      count: 4
+      role: s3
+      params:
+        model: Qwen/Qwen3-0.6B
+        base_url: http://127.0.0.1:8000
+        work_tokens: 8192
